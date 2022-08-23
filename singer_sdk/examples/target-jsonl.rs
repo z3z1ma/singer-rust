@@ -4,7 +4,7 @@ use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
 
-use log::{self, debug, info};
+use log::{debug, info};
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
 use singer_scaffold::base_sink_fields;
@@ -15,9 +15,10 @@ static MAX_BYTES: usize = 50 * MEGABYTE;
 
 #[base_sink_fields]
 struct JsonLSink {
+    #[allow(unused)]
     stream: String,
     #[allow(unused)]
-    config: Box<Value>,
+    config: Value,
     target: File,
     counter: usize,
     buffer: String,
@@ -25,7 +26,7 @@ struct JsonLSink {
 
 impl SingerSink for JsonLSink {
     // CONSTRUCTOR
-    fn new(stream: String, config: Box<Value>) -> JsonLSink {
+    fn new(stream: String, config: Value) -> JsonLSink {
         // Do custom stuff
         let fh_path = config
             .get("path")

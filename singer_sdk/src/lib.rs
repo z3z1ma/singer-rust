@@ -128,6 +128,9 @@ pub mod target {
 
     use lazy_static::lazy_static;
 
+    use crossbeam::channel;
+    use std::thread;
+
     lazy_static! {
         static ref DATE_FMT: Vec<format_description::FormatItem<'static>> =
             format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap();
@@ -139,7 +142,7 @@ pub mod target {
     /// and constructor behaviours
     pub trait SingerSink {
         /// Instantiate sink and any custom data structures
-        fn new(stream: String, config: Box<Value>) -> Self;
+        fn new(stream: String, config: Value) -> Self;
 
         /// Increment the tally for a record batch
         fn tally_record(&mut self) -> ();
@@ -230,6 +233,11 @@ pub mod target {
         }
     }
 
+    struct SingerRunner {
+        sender: channel::Sender<SingerRecord>,
+        handle: thread::JoinHandle<()>,
+    }
+
     /// Singer CLI Interface
     #[derive(Parser, Debug)]
     #[clap(author="z3z1ma", version, about="Singer target SDK", long_about = None)]
@@ -257,7 +265,7 @@ pub mod target {
         about: bool,
     }
 
-    pub fn run<T: SingerSink>() {
+    pub fn run<T: SingerSink + Send>() {
         pretty_env_logger::init();
 
         debug!("Parsing CLI arguments");
@@ -276,7 +284,7 @@ pub mod target {
 
         let config_file = File::open(config_path).unwrap();
 
-        let config: Box<Value> = Box::new(serde_json::from_reader(config_file).unwrap());
+        let config: Value = serde_json::from_reader(config_file).unwrap();
         info!("{}", config);
 
         let stdin = std::io::stdin();
@@ -286,7 +294,7 @@ pub mod target {
         let singer_messages = singer_parser.into_iter::<SingerMessage>();
 
         let mut live_state: Box<SingerState> = Box::new(SingerState { value: json!({}) });
-        let mut streams: HashMap<String, T> = HashMap::new();
+        let mut streams: HashMap<String, SingerRunner> = HashMap::new();
 
         for message in singer_messages {
             if let Ok(message) = message {
@@ -296,39 +304,39 @@ pub mod target {
                             Some(_) => (), // Stream Exists, mutate schema...
                             None => {
                                 info!("Creating sink for stream {}!", schema_message.stream);
-                                // HashMap<String, Sender>
-                                // Record -> HashMap -> Sender
-                                // Receiver? (in sep thread)
-
-                                // thread || for record in rx.recv() {} ?
-                                // sink write()
-                                // sink flush()
-                                // So thread needs to create/take ownership of sink
-
-                                streams.insert(
-                                    schema_message.stream.clone(),
-                                    T::new(schema_message.stream, config.clone()),
-                                );
-
-                                // Create thread listening to a channel?
-                                // write message to channel?
-                                // T::new(schema_message.stream, config.clone()),
+                                let (sender, sink_receiver) = channel::unbounded::<SingerRecord>();
+                                let stream_config = config.clone();
+                                let stream_name = schema_message.stream.clone();
+                                let handle = thread::spawn(move || {
+                                    debug!("Thread spawned for {}...", &stream_name);
+                                    let mut sink = T::new(stream_name, stream_config);
+                                    for record_message in sink_receiver.iter() {
+                                        sink.write(sink.before_write(
+                                            match sink.add_sdc_metadata() {
+                                                true => sink.add_sdc_to_record(record_message),
+                                                false => record_message,
+                                            },
+                                        ));
+                                        sink.tally_record();
+                                        if sink.ready_to_flush() {
+                                            sink.safe_flush();
+                                        }
+                                    }
+                                    if sink.buffer_size() > 0 {
+                                        sink.flush();
+                                        sink.clear_tally();
+                                    }
+                                    sink.endofpipe();
+                                });
+                                streams
+                                    .insert(schema_message.stream, SingerRunner { sender, handle });
                             }
                         }
                     }
                     SingerMessage::RECORD(record_message) => {
                         match streams.get_mut(&record_message.stream) {
                             Some(stream) => {
-                                stream.write(stream.before_write(
-                                    match stream.add_sdc_metadata() {
-                                        true => stream.add_sdc_to_record(record_message),
-                                        false => record_message,
-                                    },
-                                ));
-                                stream.tally_record();
-                                if stream.ready_to_flush() {
-                                    stream.safe_flush();
-                                }
+                                stream.sender.send(record_message).unwrap();
                             }
                             None => panic!(
                                 "Record for stream {} seen before SCHEMA message",
@@ -349,16 +357,13 @@ pub mod target {
             }
         }
 
-        for (stream_name, mut sink) in streams {
+        for (stream_name, sink) in streams {
+            drop(sink.sender);
+            sink.handle.join().unwrap();
             info!(
                 "Stream {:?} completed, cleaning up resources...",
                 stream_name
             );
-            if sink.buffer_size() > 0 {
-                sink.flush();
-                sink.clear_tally();
-            }
-            sink.endofpipe();
         }
 
         info!("Message Handler threads completed!");

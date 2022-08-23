@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 // use std::env;
+use tokio;
 
 use log::{self, debug, info};
 use singer::messages::SingerRecord;
@@ -15,12 +16,10 @@ use gcp_bigquery_client::model::{
 };
 use gcp_bigquery_client::Client;
 
-use lazy_static::lazy_static;
 use std::time::{Duration, SystemTime};
 use time::{format_description, OffsetDateTime};
 
-use crossbeam::{channel, thread};
-use tokio;
+use lazy_static::lazy_static;
 
 #[derive(Serialize)]
 struct SinkRow {
@@ -53,7 +52,7 @@ lazy_static! {
 struct BigQuerySink {
     stream: String,
     #[allow(unused)]
-    config: Box<Value>,
+    config: Value,
     client: Client,
     counter: usize,
     buffer: TableDataInsertAllRequest,
@@ -62,7 +61,7 @@ struct BigQuerySink {
 
 impl SingerSink for BigQuerySink {
     // CONSTUCTOR
-    fn new(stream: String, config: Box<Value>) -> BigQuerySink {
+    fn new(stream: String, config: Value) -> BigQuerySink {
         // Do custom stuff
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -183,7 +182,7 @@ clustered by related _sdc timestamp fields.",
         self.counter
     }
     fn max_buffer_size(&self) -> usize {
-        50
+        500
     }
 
     // WRITER
