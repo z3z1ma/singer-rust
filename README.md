@@ -1,34 +1,26 @@
 # Singer Rust
 
+🚧 This is a WIP and does not fully support all possible singer components yet (proerties, catalog)
+
 This is a rust SDK for the Singer ecosystem.  It is designed to minimize boilerplate required to make a fast, efficient tap or target deployable anywhere with minimal binary sizes.
 
 Here is the complete working `target-jsonl` example, this compiles to ~1.7Mb on Mac and the throughput is significant but pending more reliable benchamrks:
 
 ```rust
 use serde_json::{to_string, Value};
-use std::borrow::BorrowMut;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
 
-use log::{debug, info};
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
-use singer_scaffold::base_sink_fields;
 
-// 50mb Memory Limit per sink
-static MEGABYTE: usize = 1000000;
-static MAX_BYTES: usize = 50 * MEGABYTE;
-
-#[base_sink_fields]
 struct JsonLSink {
     #[allow(unused)]
     stream: String,
     #[allow(unused)]
     config: Value,
     target: File,
-    counter: usize,
-    buffer: String,
 }
 
 impl SingerSink for JsonLSink {
@@ -54,48 +46,19 @@ impl SingerSink for JsonLSink {
             stream,
             config,
             target: fh,
-            counter: 0,
-            buffer: String::new(),
         }
     }
-    // COUNTER
-    fn tally_record(&mut self) -> () {
-        self.counter += 1;
-    }
-    fn clear_tally(&mut self) -> () {
-        self.counter = 0;
-    }
-    fn buffer_size(&self) -> usize {
-        self.counter
-    }
-    // WRITER
-    fn write(&mut self, record_message: SingerRecord) {
-        debug!("{:?}: Got {:?}", self.stream, &record_message);
-        // The most efficient method is to write to a string buffer
-        // over a Vec<String> since we would need to reallocate
-        // memory in order to `join` the strings for JSONL
-        self.buffer.push_str(
-            &to_string(&record_message.record).expect("Invalid RECORD message received from tap"),
-        );
-        self.buffer.push_str("\n");
-        // Custom flush example which is enforced in *conjunction
-        // with default mechanism which is based on record count
-        if self.buffer.len() > MAX_BYTES {
-            self.safe_flush()
-        };
-    }
-    fn flush(&mut self) {
-        info!(
-            "Executing flush of {:?} records...",
-            self.buffer.lines().count()
-        );
-        // Write to file and clear the buffer, it will maintain allocated
-        // space without needing to be resized
-        self.target
-            .borrow_mut()
-            .write(self.buffer.as_bytes())
-            .unwrap();
-        self.buffer.clear();
+    // MAIN DEVELOPER IMPL
+    fn flush(&mut self, batch: &mut Vec<SingerRecord>) -> usize {
+        let flush_size = batch.len();
+        let mut buf = String::with_capacity(flush_size);
+        for rec in batch {
+            buf.push_str(&rec.record.to_string());
+        }
+        let mut t = self.target.try_clone().unwrap();
+        t.write(buf.as_bytes()).unwrap();
+        buf.clear();
+        flush_size
     }
 }
 
@@ -110,5 +73,3 @@ All that is required of the developer if to create a struct which implements `Si
 
     stream: String,
     config: serde_json::Value,
-    counter: usize,
-    buffer: (Can be creative)
