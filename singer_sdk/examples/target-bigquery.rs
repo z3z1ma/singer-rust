@@ -4,10 +4,9 @@ use serde_json::{json, Value};
 // use std::env;
 use tokio;
 
-use log::{self, debug, info};
+use log::{self, info};
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
-use singer_scaffold::base_sink_fields;
 
 use gcp_bigquery_client::model::{
     clustering::Clustering, dataset::Dataset, table::Table,
@@ -16,6 +15,7 @@ use gcp_bigquery_client::model::{
 };
 use gcp_bigquery_client::Client;
 
+use std::borrow::Borrow;
 use std::time::{Duration, SystemTime};
 use time::{format_description, OffsetDateTime};
 
@@ -48,139 +48,137 @@ lazy_static! {
     static ref BATCH_DATE: String = OffsetDateTime::now_utc().format(&DATE_FMT).unwrap();
 }
 
-#[base_sink_fields]
 struct BigQuerySink {
     stream: String,
     #[allow(unused)]
     config: Value,
     client: Client,
-    counter: usize,
     buffer: TableDataInsertAllRequest,
-    rt: tokio::runtime::Runtime,
 }
 
 impl SingerSink for BigQuerySink {
     // CONSTUCTOR
     fn new(stream: String, config: Value) -> BigQuerySink {
         // Do custom stuff
-        let rt = tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
-        let gcp_sa_key = config.get("credentials_path").map(|v| v.as_str().unwrap());
-        let client = rt.block_on(gcp_bigquery_client::Client::from_service_account_key_file(
-            gcp_sa_key.unwrap(),
-        ));
-        let target = &stream.to_lowercase();
+            .unwrap()
+            .block_on(async {
+                let gcp_sa_key = config.get("credentials_path").map(|v| v.as_str().unwrap());
+                let client =
+                    gcp_bigquery_client::Client::from_service_account_key_file(gcp_sa_key.unwrap())
+                        .await;
+                let target = &stream.to_lowercase();
 
-        // Ensure Target Dataset Exists
-        let dataset = match rt.block_on(client.dataset().exists(
-            config["project_id"].as_str().unwrap(),
-            config["dataset_id"].as_str().unwrap(),
-        )) {
-            Ok(true) => rt
-                .block_on(client.dataset().get(
-                    config["project_id"].as_str().unwrap(),
-                    config["dataset_id"].as_str().unwrap(),
-                ))
-                .unwrap(),
-            Err(_) | Ok(false) => rt
-                .block_on(
-                    client.dataset().create(
-                        Dataset::new(
+                // Ensure Target Dataset Exists
+                let dataset = match client
+                    .dataset()
+                    .exists(
+                        config["project_id"].as_str().unwrap(),
+                        config["dataset_id"].as_str().unwrap(),
+                    )
+                    .await
+                {
+                    Ok(true) => client
+                        .dataset()
+                        .get(
                             config["project_id"].as_str().unwrap(),
                             config["dataset_id"].as_str().unwrap(),
                         )
-                        .location("US")
-                        .friendly_name("Dataset created by Singer-rust"),
-                    ),
-                )
-                .unwrap(),
-        };
-
-        // Ensure Target Table Exists
-        match rt.block_on(client.table().exists(
-            config["project_id"].as_str().unwrap(),
-            config["dataset_id"].as_str().unwrap(),
-            target,
-        )) {
-            Ok(true) => rt
-                .block_on(client.table().get(
-                    config["project_id"].as_str().unwrap(),
-                    config["dataset_id"].as_str().unwrap(),
-                    target,
-                    None,
-                ))
-                .unwrap(),
-            Err(_) | Ok(false) => rt
-                .block_on(
-                    dataset.create_table(
-                        &client,
-                        Table::from_dataset(
-                            &dataset,
-                            target,
-                            TableSchema::new(vec![
-                                TableFieldSchema::json("data"),
-                                TableFieldSchema::timestamp("_sdc_extracted_at"),
-                                TableFieldSchema::timestamp("_sdc_received_at"),
-                                TableFieldSchema::timestamp("_sdc_batched_at"),
-                                TableFieldSchema::timestamp("_sdc_deleted_at"),
-                                TableFieldSchema::integer("_sdc_sequence"),
-                                TableFieldSchema::integer("_sdc_table_version"),
-                            ]),
+                        .await
+                        .unwrap(),
+                    Err(_) | Ok(false) => client
+                        .dataset()
+                        .create(
+                            Dataset::new(
+                                config["project_id"].as_str().unwrap(),
+                                config["dataset_id"].as_str().unwrap(),
+                            )
+                            .location("US")
+                            .friendly_name("Dataset created by Singer-rust"),
                         )
-                        .friendly_name(&stream)
-                        .clustering(Clustering {
-                            fields: Some(vec![
-                                "_sdc_extracted_at".into(),
-                                "_sdc_received_at".into(),
-                                "_sdc_batched_at".into(),
-                            ]),
-                        })
-                        .description(&format!(
-                            "
+                        .await
+                        .unwrap(),
+                };
+
+                // Ensure Target Table Exists
+                match client
+                    .table()
+                    .exists(
+                        config["project_id"].as_str().unwrap(),
+                        config["dataset_id"].as_str().unwrap(),
+                        target,
+                    )
+                    .await
+                {
+                    Ok(true) => client
+                        .table()
+                        .get(
+                            config["project_id"].as_str().unwrap(),
+                            config["dataset_id"].as_str().unwrap(),
+                            target,
+                            None,
+                        )
+                        .await
+                        .unwrap(),
+                    Err(_) | Ok(false) => dataset
+                        .create_table(
+                            &client,
+                            Table::from_dataset(
+                                &dataset,
+                                target,
+                                TableSchema::new(vec![
+                                    TableFieldSchema::json("data"),
+                                    TableFieldSchema::timestamp("_sdc_extracted_at"),
+                                    TableFieldSchema::timestamp("_sdc_received_at"),
+                                    TableFieldSchema::timestamp("_sdc_batched_at"),
+                                    TableFieldSchema::timestamp("_sdc_deleted_at"),
+                                    TableFieldSchema::integer("_sdc_sequence"),
+                                    TableFieldSchema::integer("_sdc_table_version"),
+                                ]),
+                            )
+                            .friendly_name(&stream)
+                            .clustering(Clustering {
+                                fields: Some(vec![
+                                    "_sdc_extracted_at".into(),
+                                    "_sdc_received_at".into(),
+                                    "_sdc_batched_at".into(),
+                                ]),
+                            })
+                            .description(&format!(
+                                "
 This table is loaded via target-bigquery which is a 
 Singer target that uses an unstructured load approach. 
 The originating stream name is `{}`. 
 This table is partitioned by _sdc_batched_at and 
 clustered by related _sdc timestamp fields.",
-                            target
-                        ))
-                        .expiration_time(SystemTime::now() + Duration::from_secs(3600))
-                        .time_partitioning(
-                            TimePartitioning::per_day()
-                                .expiration_ms(Duration::from_secs(3600 * 24 * 7))
-                                .field("_sdc_batched_at"),
-                        ),
-                    ),
-                )
-                .unwrap(),
-        };
+                                target
+                            ))
+                            .expiration_time(SystemTime::now() + Duration::from_secs(3600))
+                            .time_partitioning(
+                                TimePartitioning::per_day()
+                                    .expiration_ms(Duration::from_secs(3600 * 24 * 7))
+                                    .field("_sdc_batched_at"),
+                            ),
+                        )
+                        .await
+                        .unwrap(),
+                };
 
-        // Prep buffer
-        let buffer = TableDataInsertAllRequest::new();
+                // Prep buffer
+                let buffer = TableDataInsertAllRequest::new();
 
-        // Return your sink
-        return BigQuerySink {
-            stream,
-            config,
-            client,
-            counter: 0,
-            buffer,
-            rt,
-        };
+                // Return your sink
+                return BigQuerySink {
+                    stream,
+                    config,
+                    client,
+                    buffer,
+                };
+            })
     }
 
-    // COUNTER
-    fn tally_record(&mut self) -> () {
-        self.counter += 1;
-    }
-    fn clear_tally(&mut self) -> () {
-        self.counter = 0;
-    }
-    fn buffer_size(&self) -> usize {
-        self.counter
-    }
     fn max_buffer_size(&self) -> usize {
         500
     }
@@ -206,66 +204,70 @@ clustered by related _sdc timestamp fields.",
         record_message
     }
 
-    // Explore optimization
-    // We can write every record as an API request...
-    // Or we can figure out how to thread it
-    // probably with mpsc? or a more basic channel? is Single-consumer a bottleneck?
-    // MAYBE we spin up 4-8 threads and they all listen to one channel :) 🚀
-    fn write(&mut self, record_message: SingerRecord) {
-        debug!("{:?}: Got {:?}", self.stream, &record_message);
-        let _ = self
-            .buffer
-            .add_row(
-                None,
-                SinkRow {
-                    data: record_message.record.to_string(),
-                    _sdc_extracted_at: record_message
-                        .record
-                        .get("_sdc_extracted_at")
-                        .map(|v| v.as_str().unwrap().to_string()),
-                    _sdc_received_at: record_message
-                        .record
-                        .get("_sdc_received_at")
-                        .map(|v| v.as_str().unwrap().to_string()),
-                    _sdc_batched_at: record_message
-                        .record
-                        .get("_sdc_batched_at")
-                        .map(|v| v.as_str().unwrap().to_string()),
-                    _sdc_deleted_at: record_message
-                        .record
-                        .get("_sdc_deleted_at")
-                        .map(|v| v.as_str().unwrap().to_string()),
-                    _sdc_sequence: record_message
-                        .record
-                        .get("_sdc_sequence")
-                        .map(|v| v.as_u64().unwrap()),
-                    _sdc_table_version: record_message
-                        .record
-                        .get("_sdc_table_version")
-                        .map(|v| v.as_u64().unwrap()),
-                },
-            )
-            .unwrap();
-        // info!("{:?}", resp)
-    }
-
-    fn flush(&mut self) {
-        info!("Executing flush of {:?} records...", self.buffer.len());
-        // Write to BQ
-        let resp = self
-            .rt
-            .block_on(self.client.tabledata().insert_all(
-                self.config["project_id"].as_str().unwrap(),
-                self.config["dataset_id"].as_str().unwrap(),
-                &self.stream.to_lowercase(),
-                self.buffer.clone(),
-            ))
-            .unwrap();
-        // TODO: check for errors, move without clone
-        if let Some(err) = resp.insert_errors {
-            panic!("{:?}", err)
-        }
-        self.buffer.clear();
+    fn flush(&mut self, batch: &mut Vec<SingerRecord>) -> usize {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let flush_size = batch.len();
+                info!("Executing flush of {:?} records...", flush_size);
+                // Write to BQ
+                let project_id = self.config.get("project_id").unwrap().clone();
+                let dataset_id = self.config.get("dataset_id").unwrap().clone();
+                let stream = self.stream.to_lowercase();
+                let mut buffer = self.buffer.clone();
+                for row in batch {
+                    buffer
+                        .add_row(
+                            None,
+                            SinkRow {
+                                data: row.record.to_string(),
+                                _sdc_extracted_at: row
+                                    .record
+                                    .get("_sdc_extracted_at")
+                                    .map(|v| v.as_str().unwrap().to_string()),
+                                _sdc_received_at: row
+                                    .record
+                                    .get("_sdc_received_at")
+                                    .map(|v| v.as_str().unwrap().to_string()),
+                                _sdc_batched_at: row
+                                    .record
+                                    .get("_sdc_batched_at")
+                                    .map(|v| v.as_str().unwrap().to_string()),
+                                _sdc_deleted_at: row
+                                    .record
+                                    .get("_sdc_deleted_at")
+                                    .map(|v| v.as_str().unwrap().to_string()),
+                                _sdc_sequence: row
+                                    .record
+                                    .get("_sdc_sequence")
+                                    .map(|v| v.as_u64().unwrap()),
+                                _sdc_table_version: row
+                                    .record
+                                    .get("_sdc_table_version")
+                                    .map(|v| v.as_u64().unwrap()),
+                            },
+                        )
+                        .unwrap()
+                }
+                let resp = self
+                    .client
+                    .tabledata()
+                    .insert_all(
+                        project_id.as_str().unwrap(),
+                        dataset_id.as_str().unwrap(),
+                        stream.borrow(),
+                        buffer,
+                    )
+                    .await
+                    .unwrap();
+                // TODO: check for errors, move without clone
+                if let Some(err) = resp.insert_errors {
+                    panic!("{:?}", err)
+                };
+                flush_size
+            })
     }
 }
 

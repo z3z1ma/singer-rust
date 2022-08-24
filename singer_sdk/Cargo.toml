@@ -12,11 +12,11 @@ pretty_env_logger = "0.4.0"
 singer_scaffold = { version = "*", path = "../singer_scaffold" }
 time = { version = "0.3.11", features = ["local-offset", "serde", "serde-well-known"] }
 lazy_static = "1.4.0"
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "sync", "macros"] }
 crossbeam = "0.8.2"
 
 [dev-dependencies]
 gcp-bigquery-client = { git = "https://github.com/z3z1ma/gcp-bigquery-client.git" }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "macros"] }
 
 [lib]
 name = "singer"

@@ -35,6 +35,45 @@ pub mod messages {
     }
 }
 
+/// Contains Singer CLI implementation
+mod interface {
+    use clap::{self, Parser};
+    use std::path::PathBuf;
+
+    /// This struct defines all arguments which Singer CLI programs accept
+    #[derive(Parser, Debug)]
+    #[clap(author="z3z1ma", version, about="Singer target SDK", long_about = None)]
+    pub struct SingerArgs {
+        /// Configuration file location or 'ENV' to use environment variables
+        #[clap(short, long, value_parser)]
+        pub config: PathBuf,
+
+        /// Run in discovery mode
+        #[clap(
+            short,
+            long,
+            value_parser,
+            default_value_t = false,
+            conflicts_with = "about"
+        )]
+        pub discover: bool,
+
+        /// State file location
+        #[clap(short, long, value_parser)]
+        pub state: Option<PathBuf>,
+
+        /// Dump plugin details to stdout
+        #[clap(short, long, value_parser, default_value_t = false)]
+        pub about: bool,
+    }
+
+    impl SingerArgs {
+        pub fn parse_args() -> Self {
+            SingerArgs::parse()
+        }
+    }
+}
+
 /// The SDK for creating targets with minimum boilerplate code
 /// # Example Target
 /// ```
@@ -112,24 +151,22 @@ pub mod messages {
 /// }
 /// ```
 pub mod target {
-    use clap::{self, Parser};
     use serde_json::{self, json, Value};
 
     use log::{self, debug, error, info};
     use pretty_env_logger;
 
+    use crate::interface::*;
     use crate::messages::*;
     use std::collections::HashMap;
     use std::fs::File;
-    use std::path::PathBuf;
     use std::process::exit;
 
     use time::{format_description, OffsetDateTime};
 
     use lazy_static::lazy_static;
 
-    use crossbeam::channel;
-    use std::thread;
+    use crossbeam::thread;
 
     lazy_static! {
         static ref DATE_FMT: Vec<format_description::FormatItem<'static>> =
@@ -144,23 +181,9 @@ pub mod target {
         /// Instantiate sink and any custom data structures
         fn new(stream: String, config: Value) -> Self;
 
-        /// Increment the tally for a record batch
-        fn tally_record(&mut self) -> ();
-
-        /// Reset the tally for a record batch
-        fn clear_tally(&mut self) -> ();
-
-        /// The number of records buffered
-        fn buffer_size(&self) -> usize;
-
         /// The number of records buffered
         fn max_buffer_size(&self) -> usize {
             50_000
-        }
-
-        /// The number of records buffered
-        fn ready_to_flush(&self) -> bool {
-            self.buffer_size() > self.max_buffer_size()
         }
 
         /// Get batch date string
@@ -210,21 +233,11 @@ pub mod target {
             record_message
         }
 
-        /// Writes to an internal string buffer, the singer protocol uses
-        /// UTF-8 encoded JSON strings - alternatively the user can use
-        /// Vecs or any buffer so long as the impl is satisfied
-        fn write(&mut self, record_message: SingerRecord) -> ();
-
         /// This method should process a buffer of records sending it to its destination
-        fn flush(&mut self) -> ();
-
-        /// This method should process a buffer of records sending it to its destination,
-        /// clear the record tally, and set a new batch date - users should
-        /// override the individual functions and leave this as-is in most cases
-        fn safe_flush(&mut self) -> () {
-            self.flush();
-            self.clear_tally();
-            self.set_batch_date();
+        fn flush(&mut self, batch: &mut Vec<SingerRecord>) -> usize {
+            let flush_size = batch.len();
+            batch.clear();
+            flush_size
         }
 
         /// A hook to execute actions after the end of input
@@ -233,43 +246,16 @@ pub mod target {
         }
     }
 
-    struct SingerRunner {
-        sender: channel::Sender<SingerRecord>,
-        handle: thread::JoinHandle<()>,
-    }
-
-    /// Singer CLI Interface
-    #[derive(Parser, Debug)]
-    #[clap(author="z3z1ma", version, about="Singer target SDK", long_about = None)]
-    struct SingerArgs {
-        /// Configuration file location or 'ENV' to use environment variables
-        #[clap(short, long, value_parser)]
-        config: PathBuf,
-
-        /// Run in discovery mode
-        #[clap(
-            short,
-            long,
-            value_parser,
-            default_value_t = false,
-            conflicts_with = "about"
-        )]
-        discover: bool,
-
-        /// State file location
-        #[clap(short, long, value_parser)]
-        state: Option<PathBuf>,
-
-        /// Dump plugin details to stdout
-        #[clap(short, long, value_parser, default_value_t = false)]
-        about: bool,
+    pub struct SingerRunner<T: SingerSink> {
+        pub sink: T,
+        pub records: Vec<SingerRecord>,
     }
 
     pub fn run<T: SingerSink + Send>() {
         pretty_env_logger::init();
 
         debug!("Parsing CLI arguments");
-        let args = SingerArgs::parse();
+        let args = SingerArgs::parse_args();
         debug!("Parsed, got {:?}", args);
 
         debug!("Checking if config file exists");
@@ -283,88 +269,100 @@ pub mod target {
         }
 
         let config_file = File::open(config_path).unwrap();
-
         let config: Value = serde_json::from_reader(config_file).unwrap();
         info!("{}", config);
 
+        let mut live_state: Box<SingerState> = Box::new(SingerState { value: json!({}) });
+        let mut streams: HashMap<String, SingerRunner<T>> = HashMap::new();
+
         let stdin = std::io::stdin();
         let stdin = stdin.lock();
-
         let singer_parser = serde_json::Deserializer::from_reader(stdin);
         let singer_messages = singer_parser.into_iter::<SingerMessage>();
-
-        let mut live_state: Box<SingerState> = Box::new(SingerState { value: json!({}) });
-        let mut streams: HashMap<String, SingerRunner> = HashMap::new();
-
         for message in singer_messages {
-            if let Ok(message) = message {
-                match message {
-                    SingerMessage::SCHEMA(schema_message) => {
-                        match streams.get(&schema_message.stream) {
-                            Some(_) => (), // Stream Exists, mutate schema...
-                            None => {
-                                info!("Creating sink for stream {}!", schema_message.stream);
-                                let (sender, sink_receiver) = channel::unbounded::<SingerRecord>();
-                                let stream_config = config.clone();
-                                let stream_name = schema_message.stream.clone();
-                                let handle = thread::spawn(move || {
-                                    debug!("Thread spawned for {}...", &stream_name);
-                                    let mut sink = T::new(stream_name, stream_config);
-                                    for record_message in sink_receiver.iter() {
-                                        sink.write(sink.before_write(
-                                            match sink.add_sdc_metadata() {
-                                                true => sink.add_sdc_to_record(record_message),
-                                                false => record_message,
-                                            },
-                                        ));
-                                        sink.tally_record();
-                                        if sink.ready_to_flush() {
-                                            sink.safe_flush();
-                                        }
-                                    }
-                                    if sink.buffer_size() > 0 {
-                                        sink.flush();
-                                        sink.clear_tally();
-                                    }
-                                    sink.endofpipe();
-                                });
-                                streams
-                                    .insert(schema_message.stream, SingerRunner { sender, handle });
-                            }
+            match message {
+                Ok(SingerMessage::SCHEMA(schema_message)) => {
+                    let this = schema_message.stream.clone();
+                    match streams.get(&this) {
+                        Some(_) => (), // Stream Exists, mutate schema... (add trait fn for schema_change)
+                        None => {
+                            info!("Creating sink for stream {}!", schema_message.stream);
+                            // Gather sink-specific config, stream name, catalog
+                            let stream_config = config.clone();
+                            let stream_name = schema_message.stream.clone();
+                            // Run T::new(), this runs user specific instantiation code
+                            let sink = T::new(stream_name, stream_config);
+                            // Push to HashMap
+                            streams.insert(
+                                schema_message.stream,
+                                SingerRunner {
+                                    sink,
+                                    records: Vec::with_capacity(5_000),
+                                },
+                            );
                         }
                     }
-                    SingerMessage::RECORD(record_message) => {
-                        match streams.get_mut(&record_message.stream) {
-                            Some(stream) => {
-                                stream.sender.send(record_message).unwrap();
-                            }
-                            None => panic!(
-                                "Record for stream {} seen before SCHEMA message",
-                                record_message.stream
-                            ),
+                }
+                Ok(SingerMessage::RECORD(record_message)) => {
+                    match streams.get_mut(&record_message.stream) {
+                        Some(stream) => {
+                            stream.records.push(stream.sink.before_write(
+                                match stream.sink.add_sdc_metadata() {
+                                    true => stream.sink.add_sdc_to_record(record_message),
+                                    false => record_message,
+                                },
+                            ));
                         }
-                    }
-                    SingerMessage::BATCH(batch_message) => match streams.get(&batch_message.stream)
-                    {
-                        Some(_) => (),
                         None => panic!(
                             "Record for stream {} seen before SCHEMA message",
-                            batch_message.stream
+                            record_message.stream
                         ),
-                    },
-                    SingerMessage::STATE(state_message) => live_state.value = state_message.value,
-                };
-            }
+                    }
+                }
+                Ok(SingerMessage::BATCH(batch_message)) => match streams.get(&batch_message.stream)
+                {
+                    Some(_) => (),
+                    None => panic!(
+                        "Record for stream {} seen before SCHEMA message",
+                        batch_message.stream
+                    ),
+                },
+                Ok(SingerMessage::STATE(state_message)) => live_state.value = state_message.value,
+                Err(_) => {
+                    debug!("Invalid Singer message received on stdin");
+                    continue;
+                }
+            };
+            // FLUSH
+            thread::scope(|s| {
+                for (stream, container) in streams.iter_mut() {
+                    if container.records.len() > container.sink.max_buffer_size() {
+                        info!("Beginning flush for stream {}!", stream);
+                        s.spawn(move |_| {
+                            let buf: &mut Vec<SingerRecord> = container.records.as_mut();
+                            container.sink.flush(buf);
+                            container.records.clear();
+                        });
+                    }
+                }
+            })
+            .unwrap();
         }
 
-        for (stream_name, sink) in streams {
-            drop(sink.sender);
-            sink.handle.join().unwrap();
-            info!(
-                "Stream {:?} completed, cleaning up resources...",
-                stream_name
-            );
-        }
+        // FLUSH
+        thread::scope(|s| {
+            for (stream, container) in streams.iter_mut() {
+                if container.records.len() > 0 {
+                    info!("Stream {:?} completed, cleaning up resources...", stream);
+                    s.spawn(move |_| {
+                        let buf: &mut Vec<SingerRecord> = container.records.as_mut();
+                        container.sink.flush(buf);
+                        container.records.clear();
+                    });
+                }
+            }
+        })
+        .unwrap();
 
         info!("Message Handler threads completed!");
         info!("{:?}", live_state)
