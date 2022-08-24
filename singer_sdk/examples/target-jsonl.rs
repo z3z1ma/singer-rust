@@ -1,4 +1,4 @@
-use serde_json::{to_string, Value};
+use serde_json::Value;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;

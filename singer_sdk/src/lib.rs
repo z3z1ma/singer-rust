@@ -62,6 +62,10 @@ mod interface {
         #[clap(short, long, value_parser)]
         pub state: Option<PathBuf>,
 
+        /// Catalog file location
+        #[clap(long, value_parser)]
+        pub catalog: Option<PathBuf>,
+
         /// Dump plugin details to stdout
         #[clap(short, long, value_parser, default_value_t = false)]
         pub about: bool,
@@ -77,17 +81,14 @@ mod interface {
 /// The SDK for creating targets with minimum boilerplate code
 /// # Example Target
 /// ```
-/// #[base_sink_fields]
 /// struct JsonLSink {
 ///     stream: String,
-///     config: Box<Value>,
+///     config: Value,
 ///     target: File,
-///     counter: usize,
-///     buffer: String,
 /// }
 ///
 /// impl SingerSink for JsonLSink {
-///     fn new(stream: String, config: Box<Value>) -> JsonLSink {
+///     fn new(stream: String, config: Value) -> JsonLSink {
 ///         let fh_path = config
 ///             .get("path")
 ///             .map(|v| v.to_string())
@@ -106,43 +107,18 @@ mod interface {
 ///             stream,
 ///             config,
 ///             target: fh,
-///             counter: 0,
-///             buffer: String::new(),
 ///         }
 ///     }
-///     fn tally_record(&mut self) -> () {
-///         self.counter += 1;
-///     }
-///     fn clear_tally(&mut self) -> () {
-///         self.counter = 0;
-///     }
-///     fn buffer_size(&self) -> usize {
-///         self.counter
-///     }
-///     fn write(&mut self, record_message: SingerRecord) {
-///         debug!("{:?}: Got {:?}", self.stream, &record_message);
-///         // The most efficient method is to write to a string buffer
-///         // over a Vec<String> since we would need to reallocate
-///         // memory in order to `join` the strings for JSONL
-///         self.buffer.push_str(
-///             &to_string(&record_message.record).expect("Invalid RECORD message received from tap"),
-///         );
-///         self.buffer.push_str("\n");
-///         // Custom flush example which is enforced in *conjunction
-///         // with default mechanism which is based on record count
-///         if self.buffer.len() > MAX_BYTES {
-///             self.safe_flush()
-///         };
-///     }
-///     fn flush(&mut self) {
-///         info!(
-///             "Executing flush of {:?} records...",
-///             self.buffer.lines().count()
-///         );
-///         // Write to file and clear the buffer, it will maintain allocated
-///         // space without needing to be resized
-///         self.target.borrow_mut().write(self.buffer.as_bytes()).unwrap();
-///         self.buffer.clear();
+///     fn flush(&mut self, batch: &mut Vec<SingerRecord>) -> usize {
+///         let flush_size = batch.len();
+///         let mut buf = String::with_capacity(flush_size);
+///         for rec in batch {
+///             buf.push_str(&rec.record.to_string());
+///         }
+///         let mut t = self.target.try_clone().unwrap();
+///         t.write(buf.as_bytes()).unwrap();
+///         buf.clear();
+///         flush_size
 ///     }
 /// }
 ///
@@ -287,12 +263,9 @@ pub mod target {
                         Some(_) => (), // Stream Exists, mutate schema... (add trait fn for schema_change)
                         None => {
                             info!("Creating sink for stream {}!", schema_message.stream);
-                            // Gather sink-specific config, stream name, catalog
                             let stream_config = config.clone();
                             let stream_name = schema_message.stream.clone();
-                            // Run T::new(), this runs user specific instantiation code
                             let sink = T::new(stream_name, stream_config);
-                            // Push to HashMap
                             streams.insert(
                                 schema_message.stream,
                                 SingerRunner {
@@ -333,7 +306,6 @@ pub mod target {
                     continue;
                 }
             };
-            // FLUSH
             thread::scope(|s| {
                 for (stream, container) in streams.iter_mut() {
                     if container.records.len() > container.sink.max_buffer_size() {
@@ -348,8 +320,6 @@ pub mod target {
             })
             .unwrap();
         }
-
-        // FLUSH
         thread::scope(|s| {
             for (stream, container) in streams.iter_mut() {
                 if container.records.len() > 0 {
