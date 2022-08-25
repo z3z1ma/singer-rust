@@ -1,4 +1,3 @@
-use serde::Serialize;
 use serde_json::{json, Value};
 
 use log::{self, debug, info};
@@ -22,27 +21,6 @@ use async_trait::async_trait;
 use futures::executor;
 use lazy_static::lazy_static;
 use tokio;
-
-#[derive(Serialize)]
-struct SinkRow {
-    /// Json serialized string data
-    data: String,
-    /// message.get("time_extracted") or now
-    #[serde(skip_serializing_if = "Option::is_none")]
-    _sdc_extracted_at: Option<String>,
-    /// dat&etime.datetime.now().isoformat()
-    _sdc_received_at: Option<String>,
-    /// context.get("batch_start_time", None) or datetime.datetime.now()
-    _sdc_batched_at: Option<String>,
-    /// record.get("_sdc_deleted_at")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    _sdc_deleted_at: Option<String>,
-    /// int(round(time.time() * 1000))
-    _sdc_sequence: Option<u64>,
-    /// message.get("version")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    _sdc_table_version: Option<u64>,
-}
 
 lazy_static! {
     static ref DATE_FMT: Vec<format_description::FormatItem<'static>> =
