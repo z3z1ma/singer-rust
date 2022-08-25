@@ -2,16 +2,18 @@ use serde_json::Value;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
 
+#[derive(Clone)]
 struct JsonLSink {
     #[allow(unused)]
     stream: String,
     #[allow(unused)]
     config: Value,
-    target: File,
+    target: Arc<File>,
 }
 
 impl SingerSink for JsonLSink {
@@ -32,23 +34,34 @@ impl SingerSink for JsonLSink {
             .append(true)
             .open(target_path)
             .unwrap();
+
         // Return your sink
         JsonLSink {
             stream,
             config,
-            target: fh,
+            target: Arc::new(fh),
         }
     }
+
+    // CUSTOM BUFFER SIZE
+    fn max_buffer_size(&self) -> usize {
+        250_000
+    }
+
     // MAIN DEVELOPER IMPL
-    fn flush(&mut self, batch: &mut Vec<SingerRecord>) -> usize {
+    fn flush(&self, mut batch: Vec<SingerRecord>) -> usize {
         let flush_size = batch.len();
-        let mut buf = String::with_capacity(flush_size);
-        for rec in batch {
-            buf.push_str(&rec.record.to_string());
-        }
         let mut t = self.target.try_clone().unwrap();
-        t.write(buf.as_bytes()).unwrap();
-        buf.clear();
+        t.write(
+            batch
+                .iter_mut()
+                .map(|msg| msg.record.to_string())
+                .collect::<Vec<String>>()
+                .join("\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        batch.clear();
         flush_size
     }
 }
