@@ -7,6 +7,8 @@ use std::sync::Arc;
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
 
+use async_trait::async_trait;
+
 #[derive(Clone)]
 struct JsonLSink {
     #[allow(unused)]
@@ -16,9 +18,10 @@ struct JsonLSink {
     target: Arc<File>,
 }
 
+#[async_trait]
 impl SingerSink for JsonLSink {
     // CONSTRUCTOR
-    fn new(stream: String, config: Value) -> JsonLSink {
+    async fn new(stream: String, config: Value) -> JsonLSink {
         // Do custom stuff
         let fh_path = config
             .get("path")
@@ -44,12 +47,17 @@ impl SingerSink for JsonLSink {
     }
 
     // CUSTOM BUFFER SIZE
-    fn max_buffer_size(&self) -> usize {
+    fn max_buffer_size() -> usize {
         250_000
     }
 
+    // 2 THREADS SINCE SYSCALLS HERE ARE FAST
+    fn flush_chan_size() -> usize {
+        2
+    }
+
     // MAIN DEVELOPER IMPL
-    fn flush(&self, mut batch: Vec<SingerRecord>) -> usize {
+    async fn flush(&self, mut batch: Vec<SingerRecord>) -> usize {
         let flush_size = batch.len();
         let mut t = self.target.try_clone().unwrap();
         t.write(
@@ -66,6 +74,7 @@ impl SingerSink for JsonLSink {
     }
 }
 
-fn main() {
-    run::<JsonLSink>()
+#[tokio::main]
+async fn main() {
+    run::<JsonLSink>().await;
 }
