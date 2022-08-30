@@ -1,7 +1,7 @@
 use gcp_bigquery_client::error::BQError;
 use serde_json::{json, Value};
 
-use log::{self, debug};
+use log::{self, debug, info};
 use singer::messages::SingerRecord;
 use singer::target::{run, SingerSink};
 
@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use lazy_static::lazy_static;
 use tokio;
 use tokio::sync::OnceCell;
-use tokio::time::sleep;
 
 lazy_static! {
     static ref GOOGLE_APPLICATION_CREDENTIALS: String =
@@ -153,6 +152,10 @@ clustered by related _sdc timestamp fields.",
         500
     }
 
+    fn flush_chan_size() -> usize {
+        10
+    }
+
     // SCHEMALESS SINK
     fn preprocess_record(&self, mut record_message: SingerRecord) -> SingerRecord {
         let nested = json!({"data": record_message.record.to_string()});
@@ -181,45 +184,53 @@ clustered by related _sdc timestamp fields.",
                     .collect(),
             )
             .unwrap();
+        drop(batch);
         loop {
-            let resp = tokio::time::timeout(
-                Duration::from_secs(60),
-                get_client().await.tabledata().insert_all(
-                    project_id.clone().as_str().unwrap(),
-                    dataset_id.clone().as_str().unwrap(),
+            let resp = get_client()
+                .await
+                .tabledata()
+                .insert_all(
+                    &project_id.as_str().unwrap().to_owned(),
+                    &dataset_id.as_str().unwrap().to_owned(),
                     &stream,
                     &buffer,
-                ),
-            )
-            .await;
-            attempts -= 1;
-            if resp.is_err() && attempts > 0 {
-                debug!("RETRY DUE TO TIMEOUT");
-                continue;
-            }
-            match resp.unwrap() {
+                )
+                .await;
+            match resp {
                 Ok(r) => {
                     if r.insert_errors.is_some() {
                         debug!("ERROR ON INSERT");
-                        panic!("{:?}", r.insert_errors)
+                        attempts -= 1;
+                        if attempts > 0 {
+                            debug!("NEED TO RETRY");
+                            continue;
+                        } else {
+                            panic!("{:?}", r.insert_errors)
+                        }
                     } else {
-                        debug!("> SUCCESS");
+                        info!("> SUCCESS");
                         break;
                     }
                 }
                 Err(BQError::RequestError(err)) => {
+                    attempts -= 1;
                     if attempts > 0 {
                         debug!("NEED TO RETRY");
-                        sleep(Duration::from_secs(1)).await;
                         continue;
                     } else {
                         panic!("Panicking after {} attempts. {:?}", attempts, err);
                     }
                 }
-                // TODO: more error handling scenarios
+                // TODO: more granular error handling scenarios?
                 Err(err) => {
+                    attempts -= 1;
                     debug!("GENERIC FAILURE");
-                    panic!("{:?}", err)
+                    if attempts > 0 {
+                        debug!("NEED TO RETRY");
+                        continue;
+                    } else {
+                        panic!("{:?}", err)
+                    }
                 }
             }
         }
@@ -227,7 +238,10 @@ clustered by related _sdc timestamp fields.",
     }
 }
 
-#[tokio::main]
-async fn main() {
-    run::<BigQuerySink>().await
+fn main() {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { run::<BigQuerySink>().await })
 }
