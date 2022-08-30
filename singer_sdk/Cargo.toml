@@ -16,6 +16,8 @@ async-trait = "*"
 tokio = { version = "*", features = ["rt-multi-thread", "sync"] }
 flume = "0.10.14"
 futures = "0.3.23"
+async-std = "*"
+flate2 = { version = "1.0.24", features = ["zlib-ng"], default-features = false }
 
 [dev-dependencies]
 gcp-bigquery-client = { git = "https://github.com/z3z1ma/gcp-bigquery-client.git" }

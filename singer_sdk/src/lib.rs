@@ -210,7 +210,7 @@ pub mod target {
         /// The max size of the channel before incoming messages yield to the
         /// runtime. This allow the developer to adjust backpressure
         fn flush_chan_size() -> usize {
-            50
+            100
         }
 
         /// A hook to preprocess a record message
@@ -232,7 +232,7 @@ pub mod target {
         }
 
         /// A hook to execute actions after the end of input
-        async fn endofpipe(&self) -> () {
+        fn endofpipe(&self) -> () {
             () // noop by default
         }
     }
@@ -273,22 +273,18 @@ pub mod target {
         // HashMap + State
         let mut live_state: Box<SingerState> = Box::new(SingerState { value: json!({}) });
         let mut streams: HashMap<String, SingerRunner<T>> = HashMap::new();
-
-        // Singer message deserializer with lazy stdin iter
-        let stdin = std::io::stdin();
-        let stdin = stdin.lock();
-        let singer_parser = serde_json::Deserializer::from_reader(stdin);
-        let singer_messages = singer_parser.into_iter::<SingerMessage>();
+        let mut record_count = 0;
 
         // Async runtime handler
-        let handle = tokio::runtime::Handle::current();
+        // let handle = tokio::runtime::Handle::current();
+        // let hhandler = async_std::task::spawn(future)
 
         // Async channels for message passing
-        let (tx, rx) = flume::bounded::<(T, Vec<SingerRecord>)>(T::flush_chan_size());
+        let (tx, rx) = flume::bounded::<(T, Vec<SingerRecord>)>(200);
 
         // Efficient async dispatcher implementation
         let rx_dispatch = rx.clone();
-        let dispatcher = handle.spawn(async move {
+        let dispatcher = async_std::task::spawn(async move {
             rx_dispatch
                 .stream()
                 .for_each_concurrent(T::flush_chan_size(), |(sink, batch)| async move {
@@ -298,7 +294,12 @@ pub mod target {
         });
 
         // Singer compliant stream handler
-        for message in singer_messages {
+        let start_time = std::time::Instant::now();
+        let stdin = async_std::io::stdin();
+        let mut line_buf = String::new();
+        while let Ok(_) = stdin.read_line(&mut line_buf).await {
+            let message = serde_json::from_str::<SingerMessage>(&line_buf);
+            line_buf.clear();
             match message {
                 Ok(SingerMessage::SCHEMA(schema_message)) => {
                     let this = schema_message.stream.clone();
@@ -330,6 +331,7 @@ pub mod target {
                                 false => stream.sink.preprocess_record(record_message),
                             });
                             stream.count += 1;
+                            record_count += 1;
                         }
                         None => panic!(
                             "Record for stream {} seen before SCHEMA message",
@@ -349,7 +351,6 @@ pub mod target {
                 Ok(SingerMessage::STATE(state_message)) => live_state.value = state_message.value,
                 Err(_) => {
                     debug!("Invalid Singer message received on stdin");
-                    continue;
                 }
             };
 
@@ -362,6 +363,10 @@ pub mod target {
                     swap(&mut buffer, &mut container.records);
                     container.count = 0;
                     tx.send_async((sink, buffer)).await.unwrap();
+                    debug!(
+                        "Records per second: {}",
+                        record_count / start_time.elapsed().as_secs()
+                    )
                 }
             }
         }
@@ -376,8 +381,6 @@ pub mod target {
                 container.count = 0;
                 tx.send_async((sink, buffer)).await.unwrap();
             }
-            container.sink.endofpipe().await;
-            debug!("FLUSHED + EOF");
         }
 
         // Await queue to be cleared
@@ -386,14 +389,19 @@ pub mod target {
         while !rx.is_empty() {
             delay.tick().await;
         }
+
         // Drop sender which will signal our dispatcher thread to wrap-up
-        drop(tx);
         debug!("QUEUE DROPPED - WAITING FOR THREAD TO JOIN");
-        // This wrap-up ensures all futures in flight complete
-        dispatcher.await.unwrap();
+        drop(tx);
+        dispatcher.await;
+
+        // End of pipe hook
+        for (_, container) in streams.iter_mut() {
+            container.sink.endofpipe();
+        }
 
         // Output success + state message
-        info!("Message Handler threads completed!");
-        info!("{:?}", live_state)
+        info!("Message Handler main thread complete! Awaiting remaining futures");
+        info!("{:?}", live_state);
     }
 }
