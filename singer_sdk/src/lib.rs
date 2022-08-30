@@ -276,15 +276,14 @@ pub mod target {
         let mut record_count = 0;
 
         // Async runtime handler
-        // let handle = tokio::runtime::Handle::current();
-        // let hhandler = async_std::task::spawn(future)
+        let handle = tokio::runtime::Handle::current();
 
         // Async channels for message passing
         let (tx, rx) = flume::bounded::<(T, Vec<SingerRecord>)>(200);
 
         // Efficient async dispatcher implementation
         let rx_dispatch = rx.clone();
-        let dispatcher = async_std::task::spawn(async move {
+        let dispatcher = handle.spawn(async move {
             rx_dispatch
                 .stream()
                 .for_each_concurrent(T::flush_chan_size(), |(sink, batch)| async move {
@@ -393,7 +392,7 @@ pub mod target {
         // Drop sender which will signal our dispatcher thread to wrap-up
         debug!("QUEUE DROPPED - WAITING FOR THREAD TO JOIN");
         drop(tx);
-        dispatcher.await;
+        dispatcher.await.unwrap();
 
         // End of pipe hook
         for (_, container) in streams.iter_mut() {
