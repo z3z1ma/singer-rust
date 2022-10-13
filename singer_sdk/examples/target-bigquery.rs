@@ -1,10 +1,5 @@
+use futures::executor;
 use gcp_bigquery_client::error::BQError;
-use serde_json::{json, Value};
-
-use log::{self, debug, info};
-use singer::messages::SingerRecord;
-use singer::target::{run, SingerSink};
-
 use gcp_bigquery_client::model::{
     clustering::Clustering, dataset::Dataset, table::Table,
     table_data_insert_all_request::TableDataInsertAllRequest,
@@ -13,94 +8,64 @@ use gcp_bigquery_client::model::{
     time_partitioning::TimePartitioning,
 };
 use gcp_bigquery_client::Client;
-
+use log::{self, debug, info};
+use serde_json::{json, Value};
+use singer::messages::SingerRecord;
+use singer::target::{run, BaseConfiguration, Processor};
 use std::env;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use lazy_static::lazy_static;
-use tokio;
-use tokio::sync::OnceCell;
+use async_compat::{Compat, CompatExt};
 
-lazy_static! {
-    static ref GOOGLE_APPLICATION_CREDENTIALS: String =
-        env::var("GOOGLE_APPLICATION_CREDENTIALS").unwrap();
-    static ref ONCE: OnceCell<Client> = OnceCell::new();
-}
-
-async fn get_client() -> &'static Client {
-    ONCE.get_or_init(|| async {
-        Client::from_service_account_key_file(&GOOGLE_APPLICATION_CREDENTIALS).await
-    })
-    .await
-}
-
-#[derive(Clone)]
 struct BigQuerySink {
     stream: String,
     config: Value,
+    client: Client,
 }
 
-#[async_trait]
-impl SingerSink for BigQuerySink {
-    // CONSTRUCTOR
-    async fn new(stream: String, config: Value) -> BigQuerySink {
-        // Do custom stuff
+impl Processor for BigQuerySink {
+    fn new(stream: String, config: Value) -> BigQuerySink {
+        let sa_json = env::var("GOOGLE_APPLICATION_CREDENTIALS").unwrap();
+        let client =
+            executor::block_on(Compat::new(Client::from_service_account_key_file(&sa_json)));
+
         let target = &stream.to_lowercase();
-        let client = get_client().await;
-        // Ensure Target Dataset Exists
-        let dataset = match client
-            .dataset()
-            .exists(
+        let dataset = match executor::block_on(Compat::new(client.dataset().exists(
+            config["project_id"].as_str().unwrap(),
+            config["dataset_id"].as_str().unwrap(),
+        ))) {
+            Ok(true) => executor::block_on(Compat::new(client.dataset().get(
                 config["project_id"].as_str().unwrap(),
                 config["dataset_id"].as_str().unwrap(),
-            )
-            .await
-        {
-            Ok(true) => client
-                .dataset()
-                .get(
-                    config["project_id"].as_str().unwrap(),
-                    config["dataset_id"].as_str().unwrap(),
-                )
-                .await
-                .unwrap(),
-            Err(_) | Ok(false) => client
-                .dataset()
-                .create(
+            )))
+            .expect("Failed to get ref to dataset?"),
+            Err(_) | Ok(false) => executor::block_on(Compat::new(
+                client.dataset().create(
                     Dataset::new(
                         config["project_id"].as_str().unwrap(),
                         config["dataset_id"].as_str().unwrap(),
                     )
                     .location("US")
                     .friendly_name("Dataset created by Singer-rust"),
-                )
-                .await
-                .unwrap(),
+                ),
+            ))
+            .expect("Failed to make dataset?"),
         };
 
-        // Ensure Target Table Exists
-        match client
-            .table()
-            .exists(
+        match executor::block_on(Compat::new(client.table().exists(
+            config["project_id"].as_str().unwrap(),
+            config["dataset_id"].as_str().unwrap(),
+            target,
+        ))) {
+            Ok(true) => executor::block_on(client.table().get(
                 config["project_id"].as_str().unwrap(),
                 config["dataset_id"].as_str().unwrap(),
                 target,
-            )
-            .await
-        {
-            Ok(true) => client
-                .table()
-                .get(
-                    config["project_id"].as_str().unwrap(),
-                    config["dataset_id"].as_str().unwrap(),
-                    target,
-                    None,
-                )
-                .await
-                .unwrap(),
-            Err(_) | Ok(false) => dataset
-                .create_table(
+                None,
+            ))
+            .unwrap(),
+            Err(_) | Ok(false) => executor::block_on(Compat::new(
+                dataset.create_table(
                     &client,
                     Table::from_dataset(
                         &dataset,
@@ -132,28 +97,21 @@ This table is partitioned by _sdc_batched_at and
 clustered by related _sdc timestamp fields.",
                         target
                     ))
-                    // .expiration_time(SystemTime::now() + Duration::from_secs(3600))
                     .time_partitioning(
                         TimePartitioning::per_day()
                             .expiration_ms(Duration::from_secs(3600 * 24 * 7))
                             .field("_sdc_batched_at"),
                     ),
-                )
-                .await
-                .unwrap(),
+                ),
+            ))
+            .unwrap(),
         };
 
-        // Return your sink
-        return BigQuerySink { stream, config };
-    }
-
-    // OPTIMUM BUFFER FOR STREAMING API
-    fn max_buffer_size() -> usize {
-        500
-    }
-
-    fn flush_chan_size() -> usize {
-        10
+        return BigQuerySink {
+            stream,
+            config,
+            client,
+        };
     }
 
     // SCHEMALESS SINK
@@ -163,11 +121,9 @@ clustered by related _sdc timestamp fields.",
         record_message
     }
 
-    // MAIN DEVELOPER IMPL
-    async fn flush(&self, batch: Vec<SingerRecord>) -> usize {
+    fn process_batch(&self, batch: Vec<SingerRecord>) {
         let flush_size = batch.len();
         debug!("Executing flush of {:?} records...", flush_size);
-        // Write to BQ
         let project_id = self.config.get("project_id").unwrap();
         let dataset_id = self.config.get("dataset_id").unwrap();
         let stream = self.stream.to_lowercase();
@@ -186,16 +142,12 @@ clustered by related _sdc timestamp fields.",
             .unwrap();
         drop(batch);
         loop {
-            let resp = get_client()
-                .await
-                .tabledata()
-                .insert_all(
-                    &project_id.as_str().unwrap().to_owned(),
-                    &dataset_id.as_str().unwrap().to_owned(),
-                    &stream,
-                    &buffer,
-                )
-                .await;
+            let resp = executor::block_on(Compat::new(self.client.tabledata().insert_all(
+                &project_id.as_str().unwrap().to_owned(),
+                &dataset_id.as_str().unwrap().to_owned(),
+                &stream,
+                &buffer,
+            )));
             match resp {
                 Ok(r) => {
                     if r.insert_errors.is_some() {
@@ -221,7 +173,6 @@ clustered by related _sdc timestamp fields.",
                         panic!("Panicking after {} attempts. {:?}", attempts, err);
                     }
                 }
-                // TODO: more granular error handling scenarios?
                 Err(err) => {
                     attempts -= 1;
                     debug!("GENERIC FAILURE");
@@ -234,14 +185,17 @@ clustered by related _sdc timestamp fields.",
                 }
             }
         }
-        flush_size
     }
 }
 
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async { run::<BigQuerySink>().await })
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(42)
+        .build_global()
+        .unwrap();
+    run::<BigQuerySink>(BaseConfiguration {
+        buffer_size: 500,
+        add_sdc_metadata: true,
+    })?;
+    Ok(())
 }

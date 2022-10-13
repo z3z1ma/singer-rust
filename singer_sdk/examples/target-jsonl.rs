@@ -2,66 +2,42 @@ use serde_json::Value;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use singer::messages::SingerRecord;
-use singer::target::{run, SingerSink};
+use singer::target::{run, BaseConfiguration, Processor};
 
-use async_trait::async_trait;
-
-#[derive(Clone)]
 struct JsonLSink {
-    #[allow(unused)]
-    stream: String,
-    #[allow(unused)]
-    config: Value,
-    target: Arc<File>,
+    fh: File,
 }
 
-#[async_trait]
-impl SingerSink for JsonLSink {
-    // CONSTRUCTOR
-    async fn new(stream: String, config: Value) -> JsonLSink {
-        // Do custom stuff
-        let fh_path = config
+impl Processor for JsonLSink {
+    fn new(stream_name: String, stream_config: Value) -> Self {
+        // Get path
+        let fh_path = stream_config
             .get("path")
             .map(|v| v.to_string())
             .unwrap_or(String::from("./"));
+        // Append /output
         let mut target_path = PathBuf::from(fh_path);
         target_path.push("output");
+        // Make dir
         create_dir_all(&target_path).unwrap();
-        target_path.push(&stream);
+        // Name {stream}.jsonl
+        target_path.push(&stream_name);
         target_path.set_extension("jsonl");
+        // Make file handle
         let fh = File::options()
             .create(true)
             .append(true)
             .open(target_path)
             .unwrap();
-
-        // Return your sink
-        JsonLSink {
-            stream,
-            config,
-            target: Arc::new(fh),
-        }
+        // Return sink
+        JsonLSink { fh }
     }
-
-    // CUSTOM BUFFER SIZE
-    fn max_buffer_size() -> usize {
-        250_000
-    }
-
-    // 2 THREADS SINCE SYSCALLS HERE ARE FAST
-    fn flush_chan_size() -> usize {
-        2
-    }
-
-    // MAIN DEVELOPER IMPL
-    async fn flush(&self, mut batch: Vec<SingerRecord>) -> usize {
-        let flush_size = batch.len();
-        let mut t = self.target.try_clone().unwrap();
+    fn process_batch(&self, mut payload: Vec<SingerRecord>) -> () {
+        let mut t = self.fh.try_clone().unwrap();
         t.write(
-            batch
+            payload
                 .iter_mut()
                 .map(|msg| msg.record.to_string())
                 .collect::<Vec<String>>()
@@ -69,12 +45,15 @@ impl SingerSink for JsonLSink {
                 .as_bytes(),
         )
         .unwrap();
-        batch.clear();
-        flush_size
+        drop(payload);
     }
 }
 
-#[tokio::main]
-async fn main() {
-    run::<JsonLSink>().await;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = BaseConfiguration {
+        buffer_size: 50000,
+        add_sdc_metadata: true,
+    };
+    run::<JsonLSink>(config)?;
+    Ok(())
 }

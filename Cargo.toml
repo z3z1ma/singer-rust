@@ -1,9 +1,6 @@
 [workspace]
 
-members = [ 
-  'singer_sdk',
-  'singer_scaffold'
-]
+members = ['singer_sdk', 'singer_scaffold']
 
 [profile.release]
 lto = true

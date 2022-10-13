@@ -9,17 +9,19 @@ serde = { version = "1.0", features = ["derive"] }
 clap = { version = "3.2.17", features = ["derive"] }
 log = "0.4.17"
 pretty_env_logger = "0.4.0"
-singer_scaffold = { version = "*", path = "../singer_scaffold" }
-time = { version = "0.3.11", features = ["local-offset", "serde", "serde-well-known"] }
-lazy_static = "1.4.0"
-async-trait = "*"
-tokio = { version = "*", features = ["rt-multi-thread", "sync"] }
-flume = "0.10.14"
-futures = "0.3.23"
-async-std = "*"
+time = { version = "0.3.11", features = [
+    "local-offset",
+    "serde",
+    "serde-well-known",
+    "macros",
+] }
+rayon = "1.5.3"
+crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
 
 [dev-dependencies]
+futures = { version = "0.3.24", features = ["executor"] }
 gcp-bigquery-client = { git = "https://github.com/z3z1ma/gcp-bigquery-client.git" }
+async-compat = "0.2.1"
 
 [lib]
 name = "singer"
