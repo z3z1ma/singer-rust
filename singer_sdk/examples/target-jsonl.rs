@@ -3,7 +3,7 @@ use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
 
-use singer::messages::SingerRecord;
+use singer::messages::Record;
 use singer::target::{run, BaseConfiguration, Processor};
 
 struct JsonLSink {
@@ -13,10 +13,8 @@ struct JsonLSink {
 impl Processor for JsonLSink {
     fn new(stream_name: String, stream_config: Value) -> Self {
         // Get path
-        let fh_path = stream_config
-            .get("path")
-            .map(|v| v.to_string())
-            .unwrap_or(String::from("./"));
+        let fh_path =
+            stream_config.get("path").map(|v| v.to_string()).unwrap_or(String::from("./"));
         // Append /output
         let mut target_path = PathBuf::from(fh_path);
         target_path.push("output");
@@ -26,17 +24,13 @@ impl Processor for JsonLSink {
         target_path.push(&stream_name);
         target_path.set_extension("jsonl");
         // Make file handle
-        let fh = File::options()
-            .create(true)
-            .append(true)
-            .open(target_path)
-            .unwrap();
+        let fh = File::options().create(true).append(true).open(target_path).unwrap();
         // Return sink
         JsonLSink { fh }
     }
-    fn process_batch(&self, mut payload: Vec<SingerRecord>) -> () {
-        let mut t = self.fh.try_clone().unwrap();
-        t.write(
+    fn process_batch(&self, mut payload: Vec<Record>) -> () {
+        let mut t = &self.fh;
+        t.write_all(
             payload
                 .iter_mut()
                 .map(|msg| msg.record.to_string())
@@ -50,10 +44,8 @@ impl Processor for JsonLSink {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = BaseConfiguration {
-        buffer_size: 50000,
-        add_sdc_metadata: true,
-    };
+    rayon::ThreadPoolBuilder::new().num_threads(2).build_global().unwrap();
+    let config = BaseConfiguration { buffer_size: 100, add_sdc_metadata: true };
     run::<JsonLSink>(config)?;
     Ok(())
 }

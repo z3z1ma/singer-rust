@@ -10,12 +10,12 @@ use gcp_bigquery_client::model::{
 use gcp_bigquery_client::Client;
 use log::{self, debug, info};
 use serde_json::{json, Value};
-use singer::messages::SingerRecord;
+use singer::messages::Record;
 use singer::target::{run, BaseConfiguration, Processor};
 use std::env;
 use std::time::Duration;
 
-use async_compat::{Compat, CompatExt};
+use async_compat::Compat;
 
 struct BigQuerySink {
     stream: String,
@@ -107,21 +107,17 @@ clustered by related _sdc timestamp fields.",
             .unwrap(),
         };
 
-        return BigQuerySink {
-            stream,
-            config,
-            client,
-        };
+        return BigQuerySink { stream, config, client };
     }
 
     // SCHEMALESS SINK
-    fn preprocess_record(&self, mut record_message: SingerRecord) -> SingerRecord {
+    fn preprocess_record(&self, mut record_message: Record) -> Record {
         let nested = json!({"data": record_message.record.to_string()});
         record_message.record = nested;
         record_message
     }
 
-    fn process_batch(&self, batch: Vec<SingerRecord>) {
+    fn process_batch(&self, batch: Vec<Record>) {
         let flush_size = batch.len();
         debug!("Executing flush of {:?} records...", flush_size);
         let project_id = self.config.get("project_id").unwrap();
@@ -189,13 +185,7 @@ clustered by related _sdc timestamp fields.",
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(42)
-        .build_global()
-        .unwrap();
-    run::<BigQuerySink>(BaseConfiguration {
-        buffer_size: 500,
-        add_sdc_metadata: true,
-    })?;
+    rayon::ThreadPoolBuilder::new().num_threads(42).build_global().unwrap();
+    run::<BigQuerySink>(BaseConfiguration { buffer_size: 500, add_sdc_metadata: true })?;
     Ok(())
 }

@@ -17,6 +17,7 @@ time = { version = "0.3.11", features = [
 ] }
 rayon = "1.5.3"
 crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
+thiserror = "1.0.37"
 
 [dev-dependencies]
 futures = { version = "0.3.24", features = ["executor"] }
