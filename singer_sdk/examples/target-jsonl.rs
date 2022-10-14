@@ -28,7 +28,7 @@ impl Processor for JsonLSink {
         // Return sink
         JsonLSink { fh }
     }
-    fn process_batch(&self, mut payload: Vec<Record>) -> () {
+    fn process_batch(&mut self, mut payload: Vec<Record>) -> () {
         let mut t = &self.fh;
         t.write_all(
             payload
@@ -44,8 +44,7 @@ impl Processor for JsonLSink {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rayon::ThreadPoolBuilder::new().num_threads(2).build_global().unwrap();
-    let config = BaseConfiguration { buffer_size: 100, add_sdc_metadata: true };
+    let config = BaseConfiguration { buffer_size: 5000, add_sdc_metadata: true };
     run::<JsonLSink>(config)?;
     Ok(())
 }

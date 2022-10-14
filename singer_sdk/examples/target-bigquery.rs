@@ -117,7 +117,7 @@ clustered by related _sdc timestamp fields.",
         record_message
     }
 
-    fn process_batch(&self, batch: Vec<Record>) {
+    fn process_batch(&mut self, batch: Vec<Record>) {
         let flush_size = batch.len();
         debug!("Executing flush of {:?} records...", flush_size);
         let project_id = self.config.get("project_id").unwrap();
