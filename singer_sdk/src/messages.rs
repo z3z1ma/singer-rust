@@ -158,6 +158,15 @@ impl Message {
         }
     }
 
+    pub fn get_stream(&self) -> Option<&str> {
+        match &self {
+            Self::Schema(ref m) => Some(&m.stream),
+            Self::Record(ref m) => Some(&m.stream),
+            Self::Batch(ref m) => Some(&m.stream),
+            Self::State(ref _m) => None,
+        }
+    }
+
     pub fn ty(&self) -> &'static str {
         match self {
             Self::State { .. } => "status",
