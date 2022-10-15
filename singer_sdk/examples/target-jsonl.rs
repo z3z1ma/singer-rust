@@ -10,12 +10,12 @@ use singer::target::{run, BaseConfiguration, SdkManagedTarget};
 
 use tokio;
 
-struct JsonLSink {
+struct TargetJsonL {
     fh: tokio::fs::File,
     buf: Vec<u8>,
 }
 
-impl JsonLSink {
+impl TargetJsonL {
     fn process_record(&mut self, record: Record) {
         serde_json::to_writer(&mut self.buf, &record.record).unwrap();
         self.buf.push(b'\n');
@@ -30,7 +30,7 @@ impl JsonLSink {
 }
 
 #[async_trait::async_trait]
-impl SdkManagedTarget for JsonLSink {
+impl SdkManagedTarget for TargetJsonL {
     async fn new(stream_name: String, target_config: serde_json::Value) -> Result<Self, Error>
     where
         Self: Sized,
@@ -49,7 +49,7 @@ impl SdkManagedTarget for JsonLSink {
         // Make file handle
         let fh = File::options().create(true).append(true).open(target_path).unwrap();
         // Return sink
-        Ok(JsonLSink {
+        Ok(TargetJsonL {
             fh: tokio::fs::File::from_std(fh),
             buf: Vec::with_capacity(1024 * 1024 * 515),
         })
@@ -86,6 +86,6 @@ async fn ingest_batch(fh: &mut tokio::fs::File, buf: &mut Vec<u8>) {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let config = BaseConfiguration { buffer_size: 150000, add_sdc_metadata: true };
-    run::<JsonLSink>(config).await?;
+    run::<TargetJsonL>(config).await?;
     Ok(())
 }
