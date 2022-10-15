@@ -283,3 +283,6 @@ pub fn into_singer_message_stream(
 ) -> StreamDeserializer<'static, IoRead<Box<dyn BufRead>>, Message> {
     Deserializer::from_reader(io_input).into_iter::<Message>()
 }
+
+pub type SingerReceiver = tokio::sync::mpsc::Receiver<Message>;
+pub type SingerSender = tokio::sync::mpsc::Sender<Message>;

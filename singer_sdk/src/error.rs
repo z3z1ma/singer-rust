@@ -3,25 +3,17 @@
 /// Defines various errors in the SDK
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Occurs when a command fails to execute. This is differs from
-    /// CommandError since it occurs when the command fails to execute
-    /// rather than executing but failing with an error.
-    #[error("Failed to exec the command")]
-    ExecError(std::io::Error),
-
-    /// Occurs when the command exits unsuccessfully. It contains the exit code
-    /// as well as the output from stderr.
-    #[error("Command failed to exit successfully. Exit code ({:0?}) \n stderr: {1}")]
-    CommandError(Option<i32>, String),
+    #[error("Trying to send a message in a channel where all receivers are dropped")]
+    SendError(#[from] tokio::sync::mpsc::error::SendError<crate::messages::Message>),
 
     #[error("IOError {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("IOError {0}")]
+    JoinError(#[from] tokio::task::JoinError),
+
     #[error("Failed to deserialize the value {0}")]
     DeserializationError(#[from] serde_json::Error),
-
-    #[error("Trying to send a message in a channel where all receivers are dropped")]
-    SendError(Box<dyn std::error::Error + Send + Sync + 'static>),
 
     #[error("Invalid conversion :: found ({0}) expected ({1})")]
     InvalidConversion(&'static str, &'static str),
