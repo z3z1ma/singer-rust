@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use serde_json;
 use tokio;
+use tokio::io::AsyncWriteExt;
 
 use singer::error::Error;
 use singer::messages::{Message, Record, SingerReceiver};
@@ -27,10 +28,9 @@ impl TargetJsonL {
     fn process_record(&mut self, record: Record) {
         serde_json::to_writer(&mut self.buf, &record.record).unwrap();
         self.buf.push(b'\n');
-        drop(record);
     }
     fn ready_to_drain(&self) -> bool {
-        self.buf.len() > 1024 * 1024 * 500
+        self.buf.len() > 1024 * 1024 * 255
     }
     fn is_empty(&self) -> bool {
         self.buf.len() == 0
@@ -59,16 +59,12 @@ impl SdkManagedTarget for TargetJsonL {
         // Return sink
         Ok(TargetJsonL {
             fh: tokio::fs::File::from_std(fh),
-            buf: Vec::with_capacity(1024 * 1024 * 515),
+            buf: Vec::with_capacity(1024 * 1024 * 265),
         })
     }
     async fn listen(&mut self, mut rx: SingerReceiver) -> Result<(), Error> {
         while let Some(message) = rx.recv().await {
             match message {
-                Message::Schema(message) => {
-                    // Don't support schema messages on a 'no schema' target
-                    drop(message);
-                }
                 Message::Record(message) => {
                     self.process_record(message);
                 }
@@ -93,7 +89,7 @@ async fn ingest_batch(fh: &mut tokio::fs::File, buf: &mut Vec<u8>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let config = BaseConfiguration { buffer_size: 150000, add_sdc_metadata: true };
+    let config = BaseConfiguration { buffer_size: 1, add_sdc_metadata: true };
     run::<TargetJsonL>(config).await?;
     Ok(())
 }
