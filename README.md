@@ -1,5 +1,7 @@
 # Singer Rust
 
+Test commit 1
+
 🚧 This is a WIP and does not fully support all possible singer components yet (properties, catalog)
 
 This is a rust SDK for the Singer ecosystem.  It is designed to minimize boilerplate required to make a fast, efficient tap or target deployable anywhere with minimal binary sizes.
